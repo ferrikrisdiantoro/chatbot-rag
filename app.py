@@ -117,7 +117,7 @@ st.title("📚 Chatbot Cerita Rakyat: Putri Kumalasari")
 st.write("Tanyakan apa saja tentang cerita 'Putri Kumalasari' yang ada di PDF ini.")
 
 # Pastikan file PDF ada di direktori yang sama atau berikan path lengkap
-PDF_FILE_PATH = "putri kumalasari.pdf" # Ganti dengan nama file PDF yang benar jika berbeda
+PDF_FILE_PATH = "putri_kumalasari.pdf" # Ganti dengan nama file PDF yang benar jika berbeda
 
 if not os.path.exists(PDF_FILE_PATH):
     st.error(f"File PDF '{PDF_FILE_PATH}' tidak ditemukan. Mohon pastikan file ada di direktori yang sama dengan `app.py`.")
