@@ -1,150 +1,90 @@
+# app.py
+import os
 import streamlit as st
-from langchain.docstore.document import Document
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-import os
-from langchain_community.document_loaders import PyPDFLoader
+from langchain.llms import HuggingFaceHub
+from langchain.chains import RetrievalQA
 
-# --- Konfigurasi Model LLM ---
-# Menggunakan TinyLlama 1.1B Chat untuk kompatibilitas Streamlit Cloud gratisan
-LLM_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# --- Konfigurasi Model & PDF ---
+PDF_FILE_PATH = "putri_kumalasari.pdf"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+LLM_MODEL = "google/flan-t5-small"  # Ringan dan cocok untuk CPU
 
-# Untuk TinyLlama, tidak perlu Hugging Face Token karena ini model publik
-HF_TOKEN = None # Tidak perlu token
+# --- Sidebar ---
+st.sidebar.title("📘 Info")
+st.sidebar.markdown("**Chatbot Cerita Rakyat: Putri Kumalasari**")
+st.sidebar.markdown("Bertanya berdasarkan isi dokumen PDF.")
+st.sidebar.markdown("---")
 
-# Pastikan ada GPU jika ingin performa baik dengan model 7B, tapi ini untuk CPU di Streamlit Cloud
-DEVICE = "cpu" # Kita paksa ke CPU karena Streamlit Cloud gratisan tidak ada GPU yang dijamin
-print(f"Menggunakan device: {DEVICE}")
+# --- Load dan Cache Resource ---
+@st.cache_resource(show_spinner="🔍 Memuat dan memproses dokumen...")
+def load_rag_components():
+    # Load PDF
+    loader = PyPDFLoader(PDF_FILE_PATH)
+    docs = loader.load()
 
-# --- Fungsi Inisialisasi Sumber Daya (untuk cache Streamlit) ---
-@st.cache_resource
-def load_resources(pdf_path):
-    st.info(f"Memuat dokumen dari: {pdf_path}...")
-    loader = PyPDFLoader(pdf_path)
-    documents = loader.load()
-    st.success(f"Berhasil memuat {len(documents)} halaman.")
+    # Split
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = splitter.split_documents(docs)
 
-    st.info("Melakukan chunking dokumen...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        length_function=len,
-        is_separator_regex=False,
-    )
-    chunks = text_splitter.split_documents(documents)
-    st.success(f"Dokumen dipecah menjadi {len(chunks)} chunks.")
+    # Embedding
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    vectorstore = FAISS.from_documents(chunks, embeddings)
 
-    st.info("Memuat model embedding...")
-    embedding_model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
-    st.success(f"Model embedding: {embedding_model_name} berhasil dimuat.")
-
-    st.info("Membuat dan mengisi vector database (FAISS)...")
-    vector_store = FAISS.from_documents(chunks, embeddings)
-    st.success("Vector database (FAISS) berhasil dibuat dan diisi.")
-
-    st.info(f"Memuat LLM: {LLM_MODEL_ID} (Ini mungkin memakan waktu)...")
-    # TinyLlama memiliki tokenizer di repo yang sama
-    tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        LLM_MODEL_ID,
-        load_in_8bit=True,
-        device_map="auto",
+    # LLM
+    llm = HuggingFaceHub(
+        repo_id=LLM_MODEL,
+        model_kwargs={"temperature": 0.3, "max_length": 256},
     )
 
-    model.eval()
-    st.success(f"LLM {LLM_MODEL_ID} berhasil dimuat ke {DEVICE}.")
-
-    return vector_store, model, tokenizer
-
-# --- Fungsi Generasi Respons (diadaptasi untuk TinyLlama Chat Format) ---
-def generate_response(query, context_docs, llm_model, llm_tokenizer):
-    context_text = "\n\n".join([doc.page_content for doc in context_docs])
-
-    # Format prompt untuk TinyLlama Chat (bisa mirip dengan Llama/Gemma Instruct)
-    # Referensi: https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0#usage
-    prompt = f"<|im_start|>system\nAnda adalah asisten yang cerdas dan informatif. Berikan jawaban yang akurat dan ringkas berdasarkan informasi kontekstual berikut dari buku cerita. Jika jawaban tidak dapat ditemukan dalam konteks, nyatakan bahwa Anda tidak memiliki informasi yang cukup dari konteks yang diberikan.<|im_end|>\n<|im_start|>user\nKonteks Cerita:\n{context_text}\n\nPertanyaan: {query}<|im_end|>\n<|im_start|>assistant\n"
-
-    input_ids = llm_tokenizer(prompt, return_tensors="pt").to(llm_model.device)
-
-    outputs = llm_model.generate(
-        **input_ids,
-        max_new_tokens=256, # Batasi agar tidak terlalu panjang
-        do_sample=True,
-        temperature=0.7,
-        top_k=50,
-        top_p=0.95,
-        pad_token_id=llm_tokenizer.eos_token_id,
-        eos_token_id=llm_tokenizer.convert_tokens_to_ids("<|im_end|>") # TinyLlama menggunakan ini sebagai EOS
+    # RAG chain
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+        return_source_documents=True,
     )
+    return qa_chain
 
-    response = llm_tokenizer.decode(outputs[0], skip_special_tokens=False)
-
-    # Logika untuk memotong prompt dari respons TinyLlama
-    try:
-        # Cari marker asisten
-        response_start_marker = "<|im_start|>assistant\n"
-        if response_start_marker in response:
-            response = response.split(response_start_marker, 1)[1].strip()
-        
-        # Hapus token khusus yang mungkin masih ada
-        response = response.replace("<|im_end|>", "").strip()
-        response = response.replace("<|im_start|>user", "").strip() # Jika ada pengulangan prompt
-        response = response.replace("<|im_start|>system", "").strip() # Jika ada pengulangan prompt
-        
-    except Exception as e:
-        st.warning(f"Error extracting response (keeping full response): {e}")
-        pass
-
-    return response
-
-# --- Fungsi utama Chatbot RAG ---
-def chatbot_rag(query, vector_db, llm_model, llm_tokenizer, top_k=3):
-    retrieved_docs = vector_db.similarity_search(query, k=top_k)
-
-    st.sidebar.markdown(f"--- Dokumen yang Ditemukan (Relevansi Top {top_k}) ---")
-    for i, doc in enumerate(retrieved_docs):
-        st.sidebar.text(f"Dokumen {i+1} (Source: {doc.metadata.get('source', 'N/A')} Page: {doc.metadata.get('page', 'N/A')}):\n{doc.page_content[:200]}...")
-    st.sidebar.markdown("---")
-
-    answer = generate_response(query, retrieved_docs, llm_model, llm_tokenizer)
-    return answer
-
-# --- Antarmuka Pengguna Streamlit ---
+# --- UI ---
 st.title("📚 Chatbot Cerita Rakyat: Putri Kumalasari")
-st.write("Tanyakan apa saja tentang cerita 'Putri Kumalasari' yang ada di PDF ini.")
-
-# Pastikan file PDF ada di direktori yang sama atau berikan path lengkap
-PDF_FILE_PATH = "putri_kumalasari.pdf" # Ganti dengan nama file PDF yang benar jika berbeda
+st.markdown("Tanyakan isi dari cerita rakyat berdasarkan dokumen PDF yang dimuat.")
 
 if not os.path.exists(PDF_FILE_PATH):
-    st.error(f"File PDF '{PDF_FILE_PATH}' tidak ditemukan. Mohon pastikan file ada di direktori yang sama dengan `app.py`.")
+    st.error(f"File PDF `{PDF_FILE_PATH}` tidak ditemukan.")
 else:
-    vector_store, llm_model, llm_tokenizer = load_resources(PDF_FILE_PATH)
+    rag_chain = load_rag_components()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    user_query = st.chat_input("Tanyakan sesuatu tentang Putri Kumalasari...")
+    user_input = st.chat_input("Apa yang ingin kamu ketahui?")
 
-    if user_query:
-        st.session_state.messages.append({"role": "user", "content": user_query})
+    if user_input:
+        st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
-            st.markdown(user_query)
+            st.markdown(user_input)
 
         with st.chat_message("assistant"):
-            with st.spinner("Sedang mencari jawaban..."):
+            with st.spinner("Menjawab..."):
                 try:
-                    response = chatbot_rag(user_query, vector_store, llm_model, llm_tokenizer)
+                    result = rag_chain(user_input)
+                    answer = result["result"]
+                    sources = result["source_documents"]
                 except Exception as e:
-                    response = f"Maaf, terjadi kesalahan saat memproses permintaan Anda: {e}"
-                    st.error(f"Error detail: {e}")
-            st.markdown(response)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+                    answer = f"⚠️ Maaf, terjadi error: {e}"
+                    sources = []
+
+                st.markdown(answer)
+                if sources:
+                    with st.expander("🔎 Sumber Konteks"):
+                        for i, doc in enumerate(sources):
+                            st.markdown(f"**Doc {i+1}:** {doc.page_content[:300]}...")
+
+        st.session_state.messages.append({"role": "assistant", "content": answer})
