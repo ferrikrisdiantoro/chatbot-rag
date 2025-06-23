@@ -51,9 +51,10 @@ def load_resources(pdf_path):
     tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(
         LLM_MODEL_ID,
-        torch_dtype=torch.float32, # Pakai float32 untuk CPU, atau float16 jika GPU tersedia
-        device_map=None,           # Paksa None untuk CPU (tidak ada auto mapping ke GPU)
+        load_in_8bit=True,
+        device_map="auto",
     )
+
     model.eval()
     st.success(f"LLM {LLM_MODEL_ID} berhasil dimuat ke {DEVICE}.")
 
