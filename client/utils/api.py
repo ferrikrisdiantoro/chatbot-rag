@@ -1,9 +1,8 @@
 import requests
 import os
-from dotenv import load_dotenv
-load_dotenv()
+import streamlit as st
 
-API_URL = os.environ.get("API_URL")
+API_URL = st.secrets["API_URL"]
 
 def upload_pdfs_api(files):
     files_payload=[("files",(f.name,f.read(),"application/pdf")) for f in files]
